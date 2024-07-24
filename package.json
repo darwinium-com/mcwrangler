@@ -1,0 +1,18 @@
+{
+  "name": "mcwrangler",
+  "version": "1.0.0",
+  "main": "mcwrangle.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "tar": "^7.4.1",
+    "yaml": "^2.4.5",
+    "yargs": "17.5.1"
+  }
+}

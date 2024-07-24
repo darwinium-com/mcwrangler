@@ -1,0 +1,15 @@
+{
+  "prod": {
+    "dwn_api_host": "<your node url>.darwinidentity.com",
+    "kv": {
+      "DWN_LABEL": "<value here>",
+      "DWN_IDENT": "<value here>",
+      "DWN_DATA": "<value here>"
+    },
+    "cert" : {
+      "key": "privkey.key",
+      "cert": "dwn_api__Darwinium.pem",
+      "passphrase": "test"
+    }
+  }
+}
