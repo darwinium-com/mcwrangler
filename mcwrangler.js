@@ -1,7 +1,6 @@
 const TOML_BOILERPLATE = `
 
 name = "{{WORKER_NAME}}"
-account_id = "{{ACCOUNT_ID}}"
 
 workers_dev = true
 compatibility_date = "2023-12-01"
@@ -29,6 +28,7 @@ kv_namespaces = [
 {{KV}}
 ]
 routes = {{ROUTES}}
+account_id = "{{ACCOUNT_ID}}"
 
 [env.{{NODE_NAME}}.vars]
 JOURNEY_ENVIRONMENT = """
@@ -129,13 +129,12 @@ const findCloudflareTargets = (inDir) => {
   return targets;
 }
 
-const processCommit = async (envName, commitHash) => {
-  const unpackDirName = `build/${envName}`;
+const processCommit = async (firstEnv, unpackDirName, commitHash) => {
   console.log(`\x1b[34m%s\x1b[0m`, `downloading edge bundle for commit: ${commitHash}) to: ./${unpackDirName}`);
-  await readTar(config[envName],  `/api/deployment/artifacts/edge_${commitHash}.tar.gz`, unpackDirName)
+  await readTar(firstEnv,  `/api/deployment/artifacts/edge_${commitHash}.tar.gz`, unpackDirName)
   let targets = findCloudflareTargets(unpackDirName);
- 
-  let terminalCommands = [];
+  let target_worker_routes = [];
+
   await Promise.all(Object.entries(targets).map(async ([targetName, target]) => {
     const workers = fs.readFileSync(`${unpackDirName}/${targetName}/workers.json`, 'utf8');
     const workersJSON = JSON.parse(workers); 
@@ -176,8 +175,7 @@ const processCommit = async (envName, commitHash) => {
 
     await Promise.all(Object.keys(workersRoutes).map(async (workerName) => {
       let outputHead = TOML_BOILERPLATE.replace(/{{WORKER_NAME}}/g, workerName)
-      .replace(/{{LOGPUSH}}/g, logpush.toString())
-      .replace(/{{ACCOUNT_ID}}/g, accountId);
+      .replace(/{{LOGPUSH}}/g, logpush.toString());
     
       // Create an [env] for each instance that we're deploying to.
       let outs = {}
@@ -193,7 +191,8 @@ const processCommit = async (envName, commitHash) => {
         let out = ENV_BOILERPLATE.replace(/{{NODE_NAME}}/g, envName)
         .replace(/{{KV}}/g, kv)
         .replace(/{{J_ENV}}/g, JSON.stringify(env, null, 2))
-        .replace(/{{ROUTES}}/g, workerRoute);
+        .replace(/{{ROUTES}}/g, workerRoute)
+        .replace(/{{ACCOUNT_ID}}/g, env.accountid ?? accountId);
 
         if(outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`] === undefined) 
           outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`] = [];
@@ -203,27 +202,28 @@ const processCommit = async (envName, commitHash) => {
       
       Object.keys(outs).forEach((outPath) => {
         fs.writeFileSync(outPath, [outputHead].concat(outs[outPath]).join('\n'), "utf-8");
-        terminalCommands.push(`cd ${unpackDirName}/${targetName}/${workerName} && wrangler deploy -e ${envName} && cd ../../../../`);
       });
-
     }));
+    target_worker_routes.push([targetName, workersRoutes]);
   }));
 
-  console.log('\n\n');
-  console.log(`\x1b[1m\x1b[4m%s\x1b[0m`, `Deployment Instructions\n`);
-  console.log(`\x1b[32m%s\x1b[0m`, '1. Notify Darwinium that the deployment(s) are starting:');
+  // Display commands in order to deploy to each environement
   Object.keys(config).forEach((envName) => {
+    console.log('\n\n');
+    console.log(`\x1b[1m\x1b[4m%s\x1b[0m`, `Deployment Instructions for environment: ${envName}\n`);
+    console.log(`\x1b[32m%s\x1b[0m`, '1. Notify Darwinium that the deployment(s) are starting:');
     console.log(`curl --request PUT --cert ${config[envName].cert.cert} --key ${config[envName].cert.key} --pass ${config[envName].cert.passphrase} https://${config[envName].dwn_api_host}:9443/api/deployment/current/${commitHash} `);
-  });
-  console.log(`\x1b[32m%s\x1b[0m`, `2. Commands to run to deploy ${unpackDirName} using wrangler:`);
-  terminalCommands.map((command) =>{
-    console.log(command);
-  });
-  console.log(`\x1b[32m%s\x1b[0m`, '3. Notify Darwinium that the deployment(s) have finished:');
-  Object.keys(config).forEach((envName) => {
+    console.log(`\x1b[32m%s\x1b[0m`, `2. Commands to run to deploy ${unpackDirName} using wrangler:`);
+    target_worker_routes.forEach(([targetName, workerRoutes]) => {
+      Object.entries(workerRoutes).forEach(([workerName, routes_by_env]) => {
+        if (envName in routes_by_env) {
+          console.log(`cd ${unpackDirName}/${targetName}/${workerName} && wrangler deploy -e ${envName} && cd ../../../../`);
+        }
+      });
+    });
+    console.log(`\x1b[32m%s\x1b[0m`, '3. Notify Darwinium that the deployment(s) have finished:');
     console.log(`curl --request PUT --cert ${config[envName].cert.cert} --key ${config[envName].cert.key} --pass ${config[envName].cert.passphrase} https://${config[envName].dwn_api_host}:9443/api/deployment/current/${commitHash}?mode=finished `);
-  });
-  
+    });
 }
 
 
@@ -240,6 +240,7 @@ been configured with access to your node.
 See: https://docs.darwinium.com/docs/setting-up-certificates for details on how to set this up.`)
     .argument('<commit hash>', 'commit hash to process')
     .option('-c, --config <configfile>', 'config.json file to use')
+    .option('-o, --out <directory_name>', 'name of output directory')
     .requiredOption('-a, --accountid <cloudflare-account-id>', 'cloudflare account id to deploy with');
   program.parse();
   let configJson = program.getOptionValue('config') || 'config.json';
@@ -257,11 +258,19 @@ See: https://docs.darwinium.com/docs/setting-up-certificates for details on how 
   }
   accountId = program.getOptionValue('accountid');
   
-  if(commitHash.length !== 40) 
-    console.log('\x1b[31m%s\x1b[0m', `Invalid commit hash: ${commitHash}`)
+  if(commitHash.length !== 40) {
+    console.log('\x1b[31m%s\x1b[0m', `Invalid commit hash: ${commitHash}`);
+    return -1;
+  }
 
-  let envName = Object.keys(config)[0]
-  await processCommit(envName, commitHash, configJson);
+  if(accountId === undefined && !Object.values(config).every((item) => item.accountid !== undefined) ) {
+    console.log(`error: required option '-a, --accountid <cloudflare-account-id>' not specified`);
+    return -1;
+  }
+
+  const unpackDirName = program.getOptionValue('out') ?? `build/${Object.keys(config)[0]}`;
+  let env = Object.values(config)[0]
+  await processCommit(env, unpackDirName, commitHash, configJson);
   
   console.log('done');
 
