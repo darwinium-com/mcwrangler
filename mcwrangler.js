@@ -43,6 +43,11 @@ const { spawn } = require('node:child_process');
 const tar = require('tar');
 const path = require('path');
 const { program } = require('commander');
+const { getExistingWorkers } = require('./thingo.js');
+const _ = require('lodash');
+const TOML = require('smol-toml');
+const wcmatch = require('wildcard-match');
+
 let config;
 let accountId;
 
@@ -130,8 +135,10 @@ const findCloudflareTargets = (inDir) => {
 }
 
 const processCommit = async (firstEnv, unpackDirName, commitHash) => {
-  console.log(`\x1b[34m%s\x1b[0m`, `downloading edge bundle for commit: ${commitHash}) to: ./${unpackDirName}`);
-  await readTar(firstEnv,  `/api/deployment/artifacts/edge_${commitHash}.tar.gz`, unpackDirName)
+  let existingWorkers = await getExistingWorkers();
+
+  //console.log(`\x1b[34m%s\x1b[0m`, `downloading edge bundle for commit: ${commitHash}) to: ./${unpackDirName}`);
+  //await readTar(firstEnv,  `/api/deployment/artifacts/edge_${commitHash}.tar.gz`, unpackDirName)
   let targets = findCloudflareTargets(unpackDirName);
   let target_worker_routes = [];
 
@@ -201,7 +208,38 @@ const processCommit = async (firstEnv, unpackDirName, commitHash) => {
       };
       
       Object.keys(outs).forEach((outPath) => {
-        fs.writeFileSync(outPath, [outputHead].concat(outs[outPath]).join('\n'), "utf-8");
+        let content = [outputHead].concat(outs[outPath]).join('\n');
+        let _contentToml = TOML.parse(content);
+        //do a check to see if we require any service bindings
+        // check matches on our path AND the inverse for wildcards
+       
+        for(const [envName, env] of Object.entries(envs)){
+          let services = [];
+          existingWorkers.forEach((worker) => {
+            //workers for our current route
+            let myRoutes = _.get(_contentToml, ['env', envName, 'routes']);
+            let workersForEnv = _.get(worker.parsed, ['env', envName, 'routes']);
+            let commonRoutes = _.intersectionWith(myRoutes, workersForEnv, (myRoute, theirRoute)=>{
+              console.log("my route:", myRoute, "their route:", theirRoute);
+              const isSame = _.isEqual(myRoute,theirRoute);
+              const oursIsSubsetOfTheirs = wcmatch(theirRoute)(myRoute);
+              const theirsIsSubsetOfOurs = wcmatch(myRoute)(theirRoute);
+              if(theirsIsSubsetOfOurs) throw new Error(`Found a route where a service binding would not work:: their route: ${theirRoute}, our route: ${myRoute}`);
+              return isSame || oursIsSubsetOfTheirs;
+            });
+            if(commonRoutes.length > 0){
+              let serviceBindingName = _.get(worker.parsed, ['name']);
+              //DONT KNOW IF THIS WORKS
+              services.push({binding: worker.parsed.name, service: worker.parsed.name});
+              _contentToml.env[envName].services = services;
+            }
+          });
+          if(services.length > 0){
+            _contentToml.env[envName].services = services;
+          }
+        }
+        
+        fs.writeFileSync(outPath, TOML.stringify(_contentToml), "utf-8");
       });
     }));
     target_worker_routes.push([targetName, workersRoutes]);
@@ -269,7 +307,7 @@ See: https://docs.darwinium.com/docs/setting-up-certificates for details on how 
   }
 
   const unpackDirName = program.getOptionValue('out') ?? `build/${Object.keys(config)[0]}`;
-  let env = Object.values(config)[0]
+  let env = Object.values(config)[0];
   await processCommit(env, unpackDirName, commitHash, configJson);
   
   console.log('done');
