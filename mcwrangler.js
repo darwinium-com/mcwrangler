@@ -29,6 +29,7 @@ kv_namespaces = [
 ]
 routes = {{ROUTES}}
 account_id = "{{ACCOUNT_ID}}"
+{{SERVICES}}
 
 [env.{{NODE_NAME}}.vars]
 JOURNEY_ENVIRONMENT = """
@@ -46,7 +47,6 @@ const { program } = require('commander');
 const { getExistingWorkers } = require('./thingo.js');
 const _ = require('lodash');
 const TOML = require('smol-toml');
-const wcmatch = require('wildcard-match');
 
 let config;
 let accountId;
@@ -134,6 +134,51 @@ const findCloudflareTargets = (inDir) => {
   return targets;
 }
 
+const trimScheme = (path) => {
+  if (path.startsWith("http://")) {
+    return path.slice(7);
+  }
+  if (path.startsWith("https://")) {
+    return path.slice(8);
+  }
+  return path;
+}
+
+const trimWildcards = (path) => {
+  path = trimScheme(path);
+  let startsWithWildcard = false;
+  if (path.startsWith("*")) {
+    path = path.slice(1);
+    startsWithWildcard = true;
+  }
+  let endsWithWildcard = false;
+  if (path.endsWith("*")) {
+    path = path.slice(0, path.length - 1);
+    endsWithWildcard = true;
+  }
+
+  return [path, startsWithWildcard, endsWithWildcard];
+}
+
+// Emulates Cloudflare's path matching logic to find overlapping routes.
+const matchPath = (patha, pathb) => {
+  let [pattern, startsWithWildcard, endsWithWildcard] = trimWildcards(patha);
+  let [tomatch, _a, _b] = trimWildcards(pathb);
+  if (startsWithWildcard) {
+    if (endsWithWildcard) {
+      return tomatch.contains(pattern);
+    } else {
+      return tomatch.endsWith(pattern);
+    }
+  } else {
+    if (endsWithWildcard) {
+      return tomatch.startsWith(pattern);
+    } else {
+      return tomatch == pattern;
+    }
+  }
+}
+
 const processCommit = async (firstEnv, unpackDirName, commitHash) => {
   let existingWorkers = await getExistingWorkers();
 
@@ -187,64 +232,106 @@ const processCommit = async (firstEnv, unpackDirName, commitHash) => {
       // Create an [env] for each instance that we're deploying to.
       let outs = {}
       for(const [envName, env] of Object.entries(envs)){
-        let workerRoute = JSON.stringify(workersRoutes[workerName][envName] ?? []);
+        let myRoutes = workersRoutes[workerName][envName] ?? [];
+        let workerRoute = JSON.stringify(myRoutes);
         // get KV Store entries
         let kv = Object.keys(config[envName].kv).map((kvName) => {
           return `{ binding = "${kvName}", id = "${config[envName].kv[kvName]}" },`;
         }).join('\n\t');
        
+        let serviceNames = myRoutes.map((myRoute) => {
+          let tightestMatchName = undefined;
+          let tightestMatch = undefined;
+          for (let worker of existingWorkers) {
+            let workersForEnv = _.get(worker.parsed, ['env', envName, 'dwn_original_routes']) ?? _.get(worker.parsed, ['env', envName, 'routes']) ?? worker.parsed.routes;
+            if (workersForEnv === undefined) {
+              continue;
+            }
+            for (const theirRoute of workersForEnv) {
+              console.log("my route:", myRoute, "their route:", theirRoute);
+              if (_.isEqual(myRoute,theirRoute)) {
+                // Since path is identical to a darwinium step, we cannot have two overlapping steps. Remove this step from that.
+                if (worker.parsed.env == undefined) {
+                  worker.parsed.env = {};
+                }
+                if (worker.parsed.env[envName] === undefined) {
+                  worker.parsed.env[envName] = {};
+                }
+                if (worker.parsed.env[envName].routes === undefined) {
+                  worker.parsed.env[envName].routes = _.cloneDeep(workersForEnv);
+                } else if (worker.parsed.env[envName].dwn_original_routes === undefined) {
+                  // Save a copy for when we tamper with it. Not needed if roots is global, since will be overriden env-by-env.
+                  worker.parsed.env[envName].dwn_original_routes = _.cloneDeep(worker.parsed.env[envName].routes);
+                }
+
+                const index = worker.parsed.env[envName].routes.indexOf(myRoute);
+                if (index > -1) {
+                  worker.parsed.env[envName].routes.splice(index, 1);
+                }
+
+                // Cannot be any tighter match than this
+                return worker.parsed.name;
+              }
+              if (matchPath(theirRoute, myRoute)) {
+                console.log("Theirs includes ours");
+                // Ours is a subset of theirs
+                if (tightestMatch === undefined || matchPath(tightestMatch, theirRoute)) {
+                  tightestMatchName = worker.parsed.name;
+                  tightestMatch = theirRoute;
+                }
+              } else if (matchPath(myRoute, theirRoute)) {
+                // Theirs is a subset of ours.
+                throw new Error(`Found a route where a service binding would not work:: their route: ${theirRoute}, our route: ${myRoute}`);
+              }
+            }
+          }
+          return tightestMatchName;
+        });
+
+        // A worker may have multiple routes, but only one upstream
+        for (let i = 1; i < serviceNames.length; ++i) {
+          if (serviceNames[i] != serviceNames[0]) {
+            throw new Error(`Conflicting upstream workers: ${myRoutes[i]} -> ${serviceNames[i]} vs ${myRoutes[0]} -> ${serviceNames[0]}`);
+          }
+        }
+
+        let services;
+        if (serviceNames.length > 0 && serviceNames[0] != undefined) {
+          services = "services = " + `services = {binding:"UPSTREAM_SERVICE",service:"${serviceNames[0]}"}`;
+          console.log("service" + services);
+        } else {
+          services = "";
+          console.log("No service");
+        }
+
         env.target_name = targetName;
         env.worker_name = workerName;
         let out = ENV_BOILERPLATE.replace(/{{NODE_NAME}}/g, envName)
         .replace(/{{KV}}/g, kv)
         .replace(/{{J_ENV}}/g, JSON.stringify(env, null, 2))
         .replace(/{{ROUTES}}/g, workerRoute)
-        .replace(/{{ACCOUNT_ID}}/g, env.accountid ?? accountId);
+        .replace(/{{ACCOUNT_ID}}/g, env.accountid ?? accountId)
+        .replace(/{{SERVICES}}/g, services);
 
         if(outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`] === undefined) 
           outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`] = [];
         outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`].push(out);
-     
       };
       
       Object.keys(outs).forEach((outPath) => {
-        let content = [outputHead].concat(outs[outPath]).join('\n');
-        let _contentToml = TOML.parse(content);
-        //do a check to see if we require any service bindings
-        // check matches on our path AND the inverse for wildcards
-       
-        for(const [envName, env] of Object.entries(envs)){
-          let services = [];
-          existingWorkers.forEach((worker) => {
-            //workers for our current route
-            let myRoutes = _.get(_contentToml, ['env', envName, 'routes']);
-            let workersForEnv = _.get(worker.parsed, ['env', envName, 'routes']);
-            let commonRoutes = _.intersectionWith(myRoutes, workersForEnv, (myRoute, theirRoute)=>{
-              console.log("my route:", myRoute, "their route:", theirRoute);
-              const isSame = _.isEqual(myRoute,theirRoute);
-              const oursIsSubsetOfTheirs = wcmatch(theirRoute)(myRoute);
-              const theirsIsSubsetOfOurs = wcmatch(myRoute)(theirRoute);
-              if(theirsIsSubsetOfOurs) throw new Error(`Found a route where a service binding would not work:: their route: ${theirRoute}, our route: ${myRoute}`);
-              return isSame || oursIsSubsetOfTheirs;
-            });
-            if(commonRoutes.length > 0){
-              let serviceBindingName = _.get(worker.parsed, ['name']);
-              //DONT KNOW IF THIS WORKS
-              services.push({binding: worker.parsed.name, service: worker.parsed.name});
-              _contentToml.env[envName].services = services;
-            }
-          });
-          if(services.length > 0){
-            _contentToml.env[envName].services = services;
-          }
-        }
-        
-        fs.writeFileSync(outPath, TOML.stringify(_contentToml), "utf-8");
+        fs.writeFileSync(outPath, [outputHead].concat(outs[outPath]).join('\n'), "utf-8");
       });
     }));
     target_worker_routes.push([targetName, workersRoutes]);
   }));
 
+  for (const worker of existingWorkers) {
+    if (!_.isEqual(worker.originalParsed, worker.parsed)) {
+      console.log(`Modifying existing worker: ${worker.file}`)
+      fs.writeFileSync(worker.file, TOML.stringify(worker.parsed));
+    }
+  }
+  
   // Display commands in order to deploy to each environement
   Object.keys(config).forEach((envName) => {
     console.log('\n\n');

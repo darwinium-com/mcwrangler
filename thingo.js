@@ -58,7 +58,13 @@ const getExistingWorkers = async () => {
   for(let file of files){
     let data = fs.readFileSync(file, 'utf8');
     let parsed = TOML.parse(data);
-    routes.push({file: file, parsed: parsed});
+    let originalParsed = _.cloneDeep(parsed);
+    if (parsed.env) {
+      for (const key of Object.keys(parsed.env)) {
+        
+      }
+    }
+    routes.push({file: file, parsed: parsed, originalParsed: originalParsed });
   }
   return routes;
 }

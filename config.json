@@ -1,10 +1,23 @@
 {
   "prod": {
-    "dwn_api_host": "<your node url>.darwinidentity.com",
+    "dwn_api_host": "salamander-possess.dev.darwinidentity.com",
     "kv": {
-      "DWN_LABEL": "<value here>",
-      "DWN_IDENT": "<value here>",
-      "DWN_DATA": "<value here>"
+      "DWN_LABEL": "b1d6bb9ec7f44f57ac8bab2fb3a9678f",
+      "DWN_IDENT": "0f43e7fd3e4d4532bd4ac62aeacbbd22",
+      "DWN_DATA": "bdb18feb8d84410d80435d4a80b13222"
+    },
+    "cert" : {
+      "key": "privkey.key",
+      "cert": "dwn_api__Darwinium.pem",
+      "passphrase": "test"
+    }
+  },
+  "wang": {
+    "dwn_api_host": "salamander-possess.dev.darwinidentity.com",
+    "kv": {
+      "DWN_LABEL": "b1d6bb9ec7f44f57ac8bab2fb3a9678f",
+      "DWN_IDENT": "0f43e7fd3e4d4532bd4ac62aeacbbd22",
+      "DWN_DATA": "bdb18feb8d84410d80435d4a80b13222"
     },
     "cert" : {
       "key": "privkey.key",
