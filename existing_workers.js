@@ -34,13 +34,14 @@ const findTomlFiles = async () => {
     }
 
     let matchedFiles = [];
+    let matches_pattern = wcmatch(element);
 
     try{
       if(fs.statSync(place).isFile()){
           matchedFiles.push(place);
       }else{
         for await (const f of getFiles(place)) {
-            let isMatch = wcmatch(element)(f);
+            let isMatch = matches_pattern(f);
             if(isMatch){
               matchedFiles.push(f);
             }

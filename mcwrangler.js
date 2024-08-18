@@ -44,7 +44,7 @@ const { spawn } = require('node:child_process');
 const tar = require('tar');
 const path = require('path');
 const { program } = require('commander');
-const { getExistingWorkers } = require('./thingo.js');
+const { getExistingWorkers } = require('./existing_workers.js');
 const _ = require('lodash');
 const TOML = require('smol-toml');
 
@@ -182,8 +182,8 @@ const matchPath = (patha, pathb) => {
 const processCommit = async (firstEnv, unpackDirName, commitHash) => {
   let existingWorkers = await getExistingWorkers();
 
-  //console.log(`\x1b[34m%s\x1b[0m`, `downloading edge bundle for commit: ${commitHash}) to: ./${unpackDirName}`);
-  //await readTar(firstEnv,  `/api/deployment/artifacts/edge_${commitHash}.tar.gz`, unpackDirName)
+  console.log(`\x1b[34m%s\x1b[0m`, `downloading edge bundle for commit: ${commitHash}) to: ./${unpackDirName}`);
+  await readTar(firstEnv,  `/api/deployment/artifacts/edge_${commitHash}.tar.gz`, unpackDirName)
   let targets = findCloudflareTargets(unpackDirName);
   let target_worker_routes = [];
 
@@ -248,7 +248,6 @@ const processCommit = async (firstEnv, unpackDirName, commitHash) => {
               continue;
             }
             for (const theirRoute of workersForEnv) {
-              console.log("my route:", myRoute, "their route:", theirRoute);
               if (_.isEqual(myRoute,theirRoute)) {
                 // Since path is identical to a darwinium step, we cannot have two overlapping steps. Remove this step from that.
                 if (worker.parsed.env == undefined) {
@@ -273,7 +272,6 @@ const processCommit = async (firstEnv, unpackDirName, commitHash) => {
                 return worker.parsed.name;
               }
               if (matchPath(theirRoute, myRoute)) {
-                console.log("Theirs includes ours");
                 // Ours is a subset of theirs
                 if (tightestMatch === undefined || matchPath(tightestMatch, theirRoute)) {
                   tightestMatchName = worker.parsed.name;
