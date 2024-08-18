@@ -297,11 +297,9 @@ const processCommit = async (firstEnv, unpackDirName, commitHash) => {
 
         let services;
         if (serviceNames.length > 0 && serviceNames[0] != undefined) {
-          services = "services = " + `services = {binding:"UPSTREAM_SERVICE",service:"${serviceNames[0]}"}`;
-          console.log("service" + services);
+          services = `services = [{binding = "UPSTREAM_SERVICE", service = "${serviceNames[0]}"}]`;
         } else {
           services = "";
-          console.log("No service");
         }
 
         env.target_name = targetName;

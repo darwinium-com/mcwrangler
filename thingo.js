@@ -58,10 +58,18 @@ const getExistingWorkers = async () => {
   for(let file of files){
     let data = fs.readFileSync(file, 'utf8');
     let parsed = TOML.parse(data);
+    // Take a copy to see if anything has changed.
     let originalParsed = _.cloneDeep(parsed);
+
+    // Check if there are any dwn_original_routes defined. If there are, attempt to move them back to routes to restore the original worker if needed.
+    // This will cause a write if the route is not swallowed by the darwinium worker this run.
     if (parsed.env) {
       for (const key of Object.keys(parsed.env)) {
-        
+        let env_conf = parsed.env[key];
+        if (env_conf.dwn_original_routes !== undefined) {
+          env_conf.routes = env_conf.dwn_original_routes;
+          env_conf.dwn_original_routes = undefined;
+        }
       }
     }
     routes.push({file: file, parsed: parsed, originalParsed: originalParsed });
