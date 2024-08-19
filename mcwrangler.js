@@ -1,42 +1,3 @@
-const TOML_BOILERPLATE = `
-
-name = "{{WORKER_NAME}}"
-
-workers_dev = true
-compatibility_date = "2023-12-01"
-main = "worker.js"
-logpush = {{LOGPUSH}}
-
-
-# UPSTREAM_SERVICE is a fixed name used in cloudflare worker
-# service_binding_name can be any cloudflare worker without route binding to it
-
-[[rules]]
-type = "ESModule"
-globs = ["worker.js"]
-fallthrough = true
-
-[[rules]]
-type = "CompiledWasm"
-globs = ["*.wasm"]
-fallthrough = true
-`
-
-const ENV_BOILERPLATE = `
-[env.{{NODE_NAME}}]
-kv_namespaces = [
-{{KV}}
-]
-routes = {{ROUTES}}
-account_id = "{{ACCOUNT_ID}}"
-{{SERVICES}}
-
-[env.{{NODE_NAME}}.vars]
-JOURNEY_ENVIRONMENT = """
-{{J_ENV}}
-"""
-`
-
 const fs = require('fs');
 const https = require('https');
 const YAML = require('yaml');
@@ -44,7 +5,7 @@ const { spawn } = require('node:child_process');
 const tar = require('tar');
 const path = require('path');
 const { program } = require('commander');
-const { getExistingWorkers } = require('./existing_workers.js');
+const { getExistingWorkers, writeoutModifiedExistingWorkers, findUpstreamService } = require('./existing_workers.js');
 const _ = require('lodash');
 const TOML = require('smol-toml');
 
@@ -134,199 +95,125 @@ const findCloudflareTargets = (inDir) => {
   return targets;
 }
 
-const trimScheme = (path) => {
-  if (path.startsWith("http://")) {
-    return path.slice(7);
+
+// Find which routes correspond to which worker on which environment.
+const buildWorkerRoutes = (envs, workersJSON) => {
+  let workersRoutes = {};
+  for(const [envName, env] of Object.entries(envs)){
+    let addEntry = (pattern, script_name) => {
+      if(workersRoutes[script_name] === undefined) 
+        workersRoutes[script_name] = {};
+      if(workersRoutes[script_name][envName] === undefined) 
+        workersRoutes[script_name][envName] = [];
+      workersRoutes[script_name][envName].push(pattern);
+    };
+  
+    // Substitute in per-target host aliases to make the final list of routes
+    workersJSON.worker_routes.forEach((workerRoute)=> {
+      let pattern = workerRoute.pattern;
+      let slash_index = pattern.indexOf("/") ?? pattern.length;
+      let substitution = (env.aliases ?? []).find((value) => {
+        return value.alias.length === slash_index && pattern.slice(0, slash_index) === value.alias
+      })
+      if (substitution === undefined) {
+        addEntry(pattern, workerRoute.script_name);
+      } else {
+        let suffix = pattern.slice(slash_index);
+        for (const host of substitution.host) {
+          addEntry(host + suffix, workerRoute.script_name);
+        }
+      }
+    });
   }
-  if (path.startsWith("https://")) {
-    return path.slice(8);
-  }
-  return path;
+  return workersRoutes;
 }
 
-const trimWildcards = (path) => {
-  path = trimScheme(path);
-  let startsWithWildcard = false;
-  if (path.startsWith("*")) {
-    path = path.slice(1);
-    startsWithWildcard = true;
-  }
-  let endsWithWildcard = false;
-  if (path.endsWith("*")) {
-    path = path.slice(0, path.length - 1);
-    endsWithWildcard = true;
-  }
+// Write out a configuration for a single worker.
+const processWorker = (workerName, logpush, allRoutes, targetName, unpackDirName, envs, existingWorkers) => {
+  const outputHead = `
+name = "${workerName}"
 
-  return [path, startsWithWildcard, endsWithWildcard];
-}
+workers_dev = true
+compatibility_date = "2023-12-01"
+main = "worker.js"
+logpush = ${logpush}
 
-// Emulates Cloudflare's path matching logic to find overlapping routes.
-const matchPath = (patha, pathb) => {
-  let [pattern, startsWithWildcard, endsWithWildcard] = trimWildcards(patha);
-  let [tomatch, _a, _b] = trimWildcards(pathb);
-  if (startsWithWildcard) {
-    if (endsWithWildcard) {
-      return tomatch.contains(pattern);
-    } else {
-      return tomatch.endsWith(pattern);
-    }
-  } else {
-    if (endsWithWildcard) {
-      return tomatch.startsWith(pattern);
-    } else {
-      return tomatch == pattern;
-    }
-  }
-}
+
+# UPSTREAM_SERVICE is a fixed name used in cloudflare worker
+# service_binding_name can be any cloudflare worker without route binding to it
+
+[[rules]]
+type = "ESModule"
+globs = ["worker.js"]
+fallthrough = true
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["*.wasm"]
+fallthrough = true
+`;
+  
+  // Create an [env] for each instance that we're deploying to.
+  let outs = []
+  for(const [envName, env] of Object.entries(envs)){
+    let myRoutes = allRoutes[envName] ?? [];
+    // get KV Store entries
+    let kv = Object.keys(config[envName].kv).map((kvName) => {
+      return `{ binding = "${kvName}", id = "${config[envName].kv[kvName]}" },`;
+    }).join('\n\t');
+  
+    let services = findUpstreamService(myRoutes, envName, existingWorkers);
+    env.target_name = targetName;
+    env.worker_name = workerName;
+
+    outs.push(`
+[env.${envName}]
+kv_namespaces = [
+${kv}
+]
+routes = ${JSON.stringify(myRoutes)}
+account_id = "${env.accountid ?? accountId}"
+${services}
+
+[env.${envName}.vars]
+JOURNEY_ENVIRONMENT = """
+${JSON.stringify(env, null, 2)}
+"""
+`);
+  };
+
+  fs.writeFileSync(`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`, [outputHead].concat(outs).join('\n'), "utf-8");
+};
 
 const processCommit = async (firstEnv, unpackDirName, commitHash) => {
   let existingWorkers = await getExistingWorkers();
 
   console.log(`\x1b[34m%s\x1b[0m`, `downloading edge bundle for commit: ${commitHash}) to: ./${unpackDirName}`);
   await readTar(firstEnv,  `/api/deployment/artifacts/edge_${commitHash}.tar.gz`, unpackDirName)
-  let targets = findCloudflareTargets(unpackDirName);
+  const targets = findCloudflareTargets(unpackDirName);
   let target_worker_routes = [];
 
   await Promise.all(Object.entries(targets).map(async ([targetName, target]) => {
     const workers = fs.readFileSync(`${unpackDirName}/${targetName}/workers.json`, 'utf8');
     const workersJSON = JSON.parse(workers); 
-    let workersRoutes = {};
-    let logpush = target.logpush ?? false;
+    const logpush = target.logpush ?? false;
 
     // Load each environment being deployed to.
     let envs = {};
     for(const envName of Object.keys(config)){
-      let env = JSON.parse(await readRemote(config[envName]));
+      const env = JSON.parse(await readRemote(config[envName]));
       envs[envName] = env;
-
-      let addEntry = (pattern, script_name) => {
-        if(workersRoutes[script_name] === undefined) 
-          workersRoutes[script_name] = {};
-        if(workersRoutes[script_name][envName] === undefined) 
-          workersRoutes[script_name][envName] = [];
-        workersRoutes[script_name][envName].push(pattern);
-      };
-  
-      // Substitute in per-target host aliases to make the final list of routes
-      workersJSON.worker_routes.forEach((workerRoute)=> {
-        let pattern = workerRoute.pattern;
-        let slash_index = pattern.indexOf("/") ?? pattern.length;
-        let substitution = (env.aliases ?? []).find((value) => {
-          return value.alias.length === slash_index && pattern.slice(0, slash_index) === value.alias
-        })
-        if (substitution === undefined) {
-          addEntry(pattern, workerRoute.script_name);
-        } else {
-          let suffix = pattern.slice(slash_index);
-          for (const host of substitution.host) {
-            addEntry(host + suffix, workerRoute.script_name);
-          }
-        }
-      });
     }
+
+    const workersRoutes = buildWorkerRoutes(envs, workersJSON);
+    target_worker_routes.push([targetName, workersRoutes]);
 
     await Promise.all(Object.keys(workersRoutes).map(async (workerName) => {
-      let outputHead = TOML_BOILERPLATE.replace(/{{WORKER_NAME}}/g, workerName)
-      .replace(/{{LOGPUSH}}/g, logpush.toString());
-    
-      // Create an [env] for each instance that we're deploying to.
-      let outs = {}
-      for(const [envName, env] of Object.entries(envs)){
-        let myRoutes = workersRoutes[workerName][envName] ?? [];
-        let workerRoute = JSON.stringify(myRoutes);
-        // get KV Store entries
-        let kv = Object.keys(config[envName].kv).map((kvName) => {
-          return `{ binding = "${kvName}", id = "${config[envName].kv[kvName]}" },`;
-        }).join('\n\t');
-       
-        let serviceNames = myRoutes.map((myRoute) => {
-          let tightestMatchName = undefined;
-          let tightestMatch = undefined;
-          for (let worker of existingWorkers) {
-            let workersForEnv = _.get(worker.parsed, ['env', envName, 'dwn_original_routes']) ?? _.get(worker.parsed, ['env', envName, 'routes']) ?? worker.parsed.routes;
-            if (workersForEnv === undefined) {
-              continue;
-            }
-            for (const theirRoute of workersForEnv) {
-              if (_.isEqual(myRoute,theirRoute)) {
-                // Since path is identical to a darwinium step, we cannot have two overlapping steps. Remove this step from that.
-                if (worker.parsed.env == undefined) {
-                  worker.parsed.env = {};
-                }
-                if (worker.parsed.env[envName] === undefined) {
-                  worker.parsed.env[envName] = {};
-                }
-                if (worker.parsed.env[envName].routes === undefined) {
-                  worker.parsed.env[envName].routes = _.cloneDeep(workersForEnv);
-                } else if (worker.parsed.env[envName].dwn_original_routes === undefined) {
-                  // Save a copy for when we tamper with it. Not needed if roots is global, since will be overriden env-by-env.
-                  worker.parsed.env[envName].dwn_original_routes = _.cloneDeep(worker.parsed.env[envName].routes);
-                }
-
-                const index = worker.parsed.env[envName].routes.indexOf(myRoute);
-                if (index > -1) {
-                  worker.parsed.env[envName].routes.splice(index, 1);
-                }
-
-                // Cannot be any tighter match than this
-                return worker.parsed.name;
-              }
-              if (matchPath(theirRoute, myRoute)) {
-                // Ours is a subset of theirs
-                if (tightestMatch === undefined || matchPath(tightestMatch, theirRoute)) {
-                  tightestMatchName = worker.parsed.name;
-                  tightestMatch = theirRoute;
-                }
-              } else if (matchPath(myRoute, theirRoute)) {
-                // Theirs is a subset of ours.
-                throw new Error(`Found a route where a service binding would not work:: their route: ${theirRoute}, our route: ${myRoute}`);
-              }
-            }
-          }
-          return tightestMatchName;
-        });
-
-        // A worker may have multiple routes, but only one upstream
-        for (let i = 1; i < serviceNames.length; ++i) {
-          if (serviceNames[i] != serviceNames[0]) {
-            throw new Error(`Conflicting upstream workers: ${myRoutes[i]} -> ${serviceNames[i]} vs ${myRoutes[0]} -> ${serviceNames[0]}`);
-          }
-        }
-
-        let services;
-        if (serviceNames.length > 0 && serviceNames[0] != undefined) {
-          services = `services = [{binding = "UPSTREAM_SERVICE", service = "${serviceNames[0]}"}]`;
-        } else {
-          services = "";
-        }
-
-        env.target_name = targetName;
-        env.worker_name = workerName;
-        let out = ENV_BOILERPLATE.replace(/{{NODE_NAME}}/g, envName)
-        .replace(/{{KV}}/g, kv)
-        .replace(/{{J_ENV}}/g, JSON.stringify(env, null, 2))
-        .replace(/{{ROUTES}}/g, workerRoute)
-        .replace(/{{ACCOUNT_ID}}/g, env.accountid ?? accountId)
-        .replace(/{{SERVICES}}/g, services);
-
-        if(outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`] === undefined) 
-          outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`] = [];
-        outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`].push(out);
-      };
-      
-      Object.keys(outs).forEach((outPath) => {
-        fs.writeFileSync(outPath, [outputHead].concat(outs[outPath]).join('\n'), "utf-8");
-      });
+      processWorker(workerName, logpush, workersRoutes[workerName], targetName, unpackDirName, envs, existingWorkers);
     }));
-    target_worker_routes.push([targetName, workersRoutes]);
   }));
 
-  for (const worker of existingWorkers) {
-    if (!_.isEqual(worker.originalParsed, worker.parsed)) {
-      console.log(`Modifying existing worker: ${worker.file}`)
-      fs.writeFileSync(worker.file, TOML.stringify(worker.parsed));
-    }
-  }
+  writeoutModifiedExistingWorkers(existingWorkers);
   
   // Display commands in order to deploy to each environement
   Object.keys(config).forEach((envName) => {
