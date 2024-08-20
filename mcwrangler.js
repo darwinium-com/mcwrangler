@@ -1,41 +1,3 @@
-const TOML_BOILERPLATE = `
-
-name = "{{WORKER_NAME}}"
-
-workers_dev = true
-compatibility_date = "2023-12-01"
-main = "worker.js"
-logpush = {{LOGPUSH}}
-
-
-# UPSTREAM_SERVICE is a fixed name used in cloudflare worker
-# service_binding_name can be any cloudflare worker without route binding to it
-
-[[rules]]
-type = "ESModule"
-globs = ["worker.js"]
-fallthrough = true
-
-[[rules]]
-type = "CompiledWasm"
-globs = ["*.wasm"]
-fallthrough = true
-`
-
-const ENV_BOILERPLATE = `
-[env.{{NODE_NAME}}]
-kv_namespaces = [
-{{KV}}
-]
-routes = {{ROUTES}}
-account_id = "{{ACCOUNT_ID}}"
-
-[env.{{NODE_NAME}}.vars]
-JOURNEY_ENVIRONMENT = """
-{{J_ENV}}
-"""
-`
-
 const fs = require('fs');
 const https = require('https');
 const YAML = require('yaml');
@@ -43,6 +5,10 @@ const { spawn } = require('node:child_process');
 const tar = require('tar');
 const path = require('path');
 const { program } = require('commander');
+const { getExistingWorkers, writeoutModifiedExistingWorkers, findUpstreamService } = require('./existing_workers.js');
+const _ = require('lodash');
+const TOML = require('smol-toml');
+
 let config;
 let accountId;
 
@@ -129,84 +95,126 @@ const findCloudflareTargets = (inDir) => {
   return targets;
 }
 
+
+// Find which routes correspond to which worker on which environment.
+const buildWorkerRoutes = (envs, workersJSON) => {
+  let workersRoutes = {};
+  for(const [envName, env] of Object.entries(envs)){
+    let addEntry = (pattern, script_name) => {
+      if(workersRoutes[script_name] === undefined) 
+        workersRoutes[script_name] = {};
+      if(workersRoutes[script_name][envName] === undefined) 
+        workersRoutes[script_name][envName] = [];
+      workersRoutes[script_name][envName].push(pattern);
+    };
+  
+    // Substitute in per-target host aliases to make the final list of routes
+    workersJSON.worker_routes.forEach((workerRoute)=> {
+      let pattern = workerRoute.pattern;
+      let slash_index = pattern.indexOf("/") ?? pattern.length;
+      let substitution = (env.aliases ?? []).find((value) => {
+        return value.alias.length === slash_index && pattern.slice(0, slash_index) === value.alias
+      })
+      if (substitution === undefined) {
+        addEntry(pattern, workerRoute.script_name);
+      } else {
+        let suffix = pattern.slice(slash_index);
+        for (const host of substitution.host) {
+          addEntry(host + suffix, workerRoute.script_name);
+        }
+      }
+    });
+  }
+  return workersRoutes;
+}
+
+// Write out a configuration for a single worker.
+const processWorker = (workerName, logpush, allRoutes, targetName, unpackDirName, envs, existingWorkers) => {
+  const outputHead = `
+name = "${workerName}"
+
+workers_dev = true
+compatibility_date = "2023-12-01"
+main = "worker.js"
+logpush = ${logpush}
+
+
+# UPSTREAM_SERVICE is a fixed name used in cloudflare worker
+# service_binding_name can be any cloudflare worker without route binding to it
+
+[[rules]]
+type = "ESModule"
+globs = ["worker.js"]
+fallthrough = true
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["*.wasm"]
+fallthrough = true
+`;
+  
+  // Create an [env] for each instance that we're deploying to.
+  let outs = []
+  for(const [envName, env] of Object.entries(envs)){
+    let myRoutes = allRoutes[envName] ?? [];
+    // get KV Store entries
+    let kv = Object.keys(config[envName].kv).map((kvName) => {
+      return `{ binding = "${kvName}", id = "${config[envName].kv[kvName]}" },`;
+    }).join('\n\t');
+  
+    let services = findUpstreamService(myRoutes, envName, existingWorkers);
+    env.target_name = targetName;
+    env.worker_name = workerName;
+
+    outs.push(`
+[env.${envName}]
+kv_namespaces = [
+${kv}
+]
+routes = ${JSON.stringify(myRoutes)}
+account_id = "${env.accountid ?? accountId}"
+${services}
+
+[env.${envName}.vars]
+JOURNEY_ENVIRONMENT = """
+${JSON.stringify(env, null, 2)}
+"""
+`);
+  };
+
+  fs.writeFileSync(`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`, [outputHead].concat(outs).join('\n'), "utf-8");
+};
+
 const processCommit = async (firstEnv, unpackDirName, commitHash) => {
+  let existingWorkers = await getExistingWorkers();
+
   console.log(`\x1b[34m%s\x1b[0m`, `downloading edge bundle for commit: ${commitHash}) to: ./${unpackDirName}`);
   await readTar(firstEnv,  `/api/deployment/artifacts/edge_${commitHash}.tar.gz`, unpackDirName)
-  let targets = findCloudflareTargets(unpackDirName);
+  const targets = findCloudflareTargets(unpackDirName);
   let target_worker_routes = [];
 
   await Promise.all(Object.entries(targets).map(async ([targetName, target]) => {
     const workers = fs.readFileSync(`${unpackDirName}/${targetName}/workers.json`, 'utf8');
     const workersJSON = JSON.parse(workers); 
-    let workersRoutes = {};
-    let logpush = target.logpush ?? false;
+    const logpush = target.logpush ?? false;
 
     // Load each environment being deployed to.
     let envs = {};
     for(const envName of Object.keys(config)){
-      let env = JSON.parse(await readRemote(config[envName]));
+      const env = JSON.parse(await readRemote(config[envName]));
       envs[envName] = env;
-
-      let addEntry = (pattern, script_name) => {
-        if(workersRoutes[script_name] === undefined) 
-          workersRoutes[script_name] = {};
-        if(workersRoutes[script_name][envName] === undefined) 
-          workersRoutes[script_name][envName] = [];
-        workersRoutes[script_name][envName].push(pattern);
-      };
-  
-      // Substitute in per-target host aliases to make the final list of routes
-      workersJSON.worker_routes.forEach((workerRoute)=> {
-        let pattern = workerRoute.pattern;
-        let slash_index = pattern.indexOf("/") ?? pattern.length;
-        let substitution = (env.aliases ?? []).find((value) => {
-          return value.alias.length === slash_index && pattern.slice(0, slash_index) === value.alias
-        })
-        if (substitution === undefined) {
-          addEntry(pattern, workerRoute.script_name);
-        } else {
-          let suffix = pattern.slice(slash_index);
-          for (const host of substitution.host) {
-            addEntry(host + suffix, workerRoute.script_name);
-          }
-        }
-      });
     }
 
-    await Promise.all(Object.keys(workersRoutes).map(async (workerName) => {
-      let outputHead = TOML_BOILERPLATE.replace(/{{WORKER_NAME}}/g, workerName)
-      .replace(/{{LOGPUSH}}/g, logpush.toString());
-    
-      // Create an [env] for each instance that we're deploying to.
-      let outs = {}
-      for(const [envName, env] of Object.entries(envs)){
-        let workerRoute = JSON.stringify(workersRoutes[workerName][envName] ?? []);
-        // get KV Store entries
-        let kv = Object.keys(config[envName].kv).map((kvName) => {
-          return `{ binding = "${kvName}", id = "${config[envName].kv[kvName]}" },`;
-        }).join('\n\t');
-       
-        env.target_name = targetName;
-        env.worker_name = workerName;
-        let out = ENV_BOILERPLATE.replace(/{{NODE_NAME}}/g, envName)
-        .replace(/{{KV}}/g, kv)
-        .replace(/{{J_ENV}}/g, JSON.stringify(env, null, 2))
-        .replace(/{{ROUTES}}/g, workerRoute)
-        .replace(/{{ACCOUNT_ID}}/g, env.accountid ?? accountId);
-
-        if(outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`] === undefined) 
-          outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`] = [];
-        outs[`${unpackDirName}/${targetName}/${workerName}/wrangler.toml`].push(out);
-     
-      };
-      
-      Object.keys(outs).forEach((outPath) => {
-        fs.writeFileSync(outPath, [outputHead].concat(outs[outPath]).join('\n'), "utf-8");
-      });
-    }));
+    const workersRoutes = buildWorkerRoutes(envs, workersJSON);
     target_worker_routes.push([targetName, workersRoutes]);
+
+    await Promise.all(Object.keys(workersRoutes).map(async (workerName) => {
+      processWorker(workerName, logpush, workersRoutes[workerName], targetName, unpackDirName, envs, existingWorkers);
+    }));
   }));
 
+  writeoutModifiedExistingWorkers(existingWorkers);
+  
   // Display commands in order to deploy to each environement
   Object.keys(config).forEach((envName) => {
     console.log('\n\n');
@@ -269,7 +277,7 @@ See: https://docs.darwinium.com/docs/setting-up-certificates for details on how 
   }
 
   const unpackDirName = program.getOptionValue('out') ?? `build/${Object.keys(config)[0]}`;
-  let env = Object.values(config)[0]
+  let env = Object.values(config)[0];
   await processCommit(env, unpackDirName, commitHash, configJson);
   
   console.log('done');

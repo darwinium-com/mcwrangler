@@ -1,0 +1,4 @@
+[
+  "/Users/foobar/dev/mcwrangler/test/**/wrangler.toml",
+  "test/some/obscure/path/my-first-worker/wrangler.toml"
+]
