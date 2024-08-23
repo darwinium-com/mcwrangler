@@ -195,7 +195,7 @@ const findUpstreamService = (myRoutes, envName, existingWorkers) => {
   }
 
   if (serviceNames.length > 0 && serviceNames[0] != undefined) {
-    return `services = [{binding = "UPSTREAM_SERVICE", service = "${serviceNames[0]}"}]`;
+    return `services = [{binding = "UPSTREAM_SERVICE", service = "${serviceNames[0]}-${envName}"}]`;
   } else {
     return "";
   }
