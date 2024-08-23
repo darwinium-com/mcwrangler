@@ -159,6 +159,19 @@ const findUpstreamService = (myRoutes, envName, existingWorkers) => {
   let serviceNames = myRoutes.map((myRoute) => {
     let tightestMatchName = undefined;
     let tightestMatch = undefined;
+    const getName = (worker) => {
+      const perEnv = _.get(worker.parsed, ['env', envName, 'name']);
+      if (perEnv != undefined) {
+        // Specifically named for this environment
+        return perEnv;
+      } else if (_.get(worker.parsed, ['env', envName]) != undefined) {
+        // worker includes this environment, use a suffixed name
+        return `${worker.parsed.name}-${envName}`;
+      } else {
+        // Worker does not include this environment, use its name as originally appears
+        return worker.parsed.name;
+      }
+    };
     for (let worker of existingWorkers) {
       let workersForEnv = _.get(worker.parsed, ['env', envName, 'dwn_original_routes']) ?? _.get(worker.parsed, ['env', envName, 'routes']) ?? worker.parsed.routes;
       if (workersForEnv === undefined) {
@@ -170,12 +183,12 @@ const findUpstreamService = (myRoutes, envName, existingWorkers) => {
           removePathFromExistingWorker(worker, envName, myRoute);
 
           // Cannot be any tighter match than this
-          return worker.parsed.name;
+          return getName(worker);
         }
         if (matchPath(theirRoute, myRoute)) {
           // Ours is a subset of theirs
           if (tightestMatch === undefined || matchPath(tightestMatch, theirRoute)) {
-            tightestMatchName = worker.parsed.name;
+            tightestMatchName = getName(worker);
             tightestMatch = theirRoute;
           }
         } else if (matchPath(myRoute, theirRoute)) {
