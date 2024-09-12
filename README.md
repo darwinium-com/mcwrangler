@@ -49,9 +49,9 @@ The file `existing_workers.json` must be updated to specify the absolute path to
 `"/Users/foobar/dev/mcwrangler/test/**/wrangler.toml"`
 
 Upon successfully loading all paths for all existing workers, McWrangler will find the most specific existing route that overlaps with the path for the Darwinium worker, according to cloudflare's rules in [https://developers.cloudflare.com/workers/configuration/routing/routes/#matching-behavior], to determine which existing route would have run.
-If this existing worker's route is a superset of Darwinium worker's routes, that worker will become the UPSTREAM_SERVICE for Darwinium's worker.
-If this existing worker's route is a subset of Darwinium worker's routes, McWrangler will terminate with an error and you should adjust Darwinium's routes within the portal.
-If this existing worker's route matches the Darwinum worker's route exactly, the existing worker will be treated as UPSTREAM_SERVICE and the route will be removed from the existing worker and transferred to the Darwinium worker. **Note** in this case the wrangler.toml files of the existing workers will be modified! There is a known issue in that formatting and comments will be lost; we recommend checking carefully and selectively reverting changes with a graphical diff editor.
+* If this existing worker's route is a superset of Darwinium worker's routes, that worker will become the UPSTREAM_SERVICE for Darwinium's worker.
+* If this existing worker's route is a subset of Darwinium worker's routes, McWrangler will terminate with an error and you should adjust Darwinium's routes within the portal.
+* If this existing worker's route matches the Darwinum worker's route exactly, the existing worker will be treated as UPSTREAM_SERVICE and the route will be removed from the existing worker and transferred to the Darwinium worker. **Note** in this case the wrangler.toml files of the existing workers will be modified! There is a known issue in that formatting and comments will be lost; we recommend checking carefully and selectively reverting changes with a graphical diff editor.
 
 Once the existing workers have all been added, the deployment procedure is as follows:
 - Run MCWrangler. **Note** the wrangler.toml files of existing workers **may** be modified! This should not be an issue under normal circumstances as the original copy would reside in source control.
