@@ -37,19 +37,21 @@ MCWrangler outputs the commands required to deploy the provided commit hash buil
 ### Integration with existing Cloudflare workers
 Darwinium must know about any existing Cloudflare workers in order to set correct routes on Darwinium workers and in some rare cases, adjust routes for existing workers where the routes overlap.
 
-**Note** the wrangler.toml files of existing workers **may** be modified!
-Darwinium must know about any existing Cloudflare workers in order to set correct routes on Darwinium workers and in some rare cases, adjust routes for existing workers where the routes overlap.
-Modification of the existing worker wrangler.toml file will only occur when a Darwinium worker route exactly matches an existing worker’s path route and deploying would cause a conflict.
-In this situation, there is a known issue in that formatting and comments will be lost.
-We would recommend checking carefully and selectively reverting changes with a graphical diff editor.
+Darwinium's workers will call the worker that would have been called for a specific URL had the darwinium worker not been there, as if it were the origin server of a request.
+It achieves this by binding this existing worker as a service binding called "UPSTREAM_SERVICE" and calling this service where it would otherwise call the origin.
 
-MCWrangler is therefore designed to be integrated with your existing "Infrastructure as Code" and the generated output files committed into source control along-side existing workers.
+To achieve this, MCWrangler is designed to be integrated with your existing "Infrastructure as Code" and the generated output files committed into source control along-side existing workers.
 
 The file `existing_workers.json` must be updated to specify the absolute path to the wrangler toml file for each existing worker. This can be done with either one entry per toml file:
 `"test/some/obscure/path/my-first-worker/wrangler.toml"`
 
  or a wildcard entry:
 `"/Users/foobar/dev/mcwrangler/test/**/wrangler.toml"`
+
+Upon successfully loading all paths for all existing workers, McWrangler will find the most specific existing route that overlaps with the path for the Darwinium worker, according to cloudflare's rules in [https://developers.cloudflare.com/workers/configuration/routing/routes/#matching-behavior], to determine which existing route would have run.
+If this existing worker's route is a superset of Darwinium worker's routes, that worker will become the UPSTREAM_SERVICE for Darwinium's worker.
+If this existing worker's route is a subset of Darwinium worker's routes, McWrangler will terminate with an error and you should adjust Darwinium's routes within the portal.
+If this existing worker's route matches the Darwinum worker's route exactly, the existing worker will be treated as UPSTREAM_SERVICE and the route will be removed from the existing worker and transferred to the Darwinium worker. **Note** in this case the wrangler.toml files of the existing workers will be modified! There is a known issue in that formatting and comments will be lost; we recommend checking carefully and selectively reverting changes with a graphical diff editor.
 
 Once the existing workers have all been added, the deployment procedure is as follows:
 - Run MCWrangler. **Note** the wrangler.toml files of existing workers **may** be modified! This should not be an issue under normal circumstances as the original copy would reside in source control.
