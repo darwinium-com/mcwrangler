@@ -90,13 +90,19 @@ const writeoutModifiedExistingWorkers = (existingWorkers) => {
 // Emulates Cloudflare's path matching logic to find overlapping routes.
 const matchPath = (patha, pathb) => {
   const trimScheme = (path) => {
-    if (path.startsWith("http://")) {
-      return path.slice(7);
+    let _path;
+    if(_.isObject(path)){
+      _path = path.pattern; 
+    }else{
+      _path = path;
     }
-    if (path.startsWith("https://")) {
-      return path.slice(8);
+    if (_path.startsWith("http://")) {
+      return _path.slice(7);
     }
-    return path;
+    if (_path.startsWith("https://")) {
+      return _path.slice(8);
+    }
+    return _path;
   }
   
   const trimWildcards = (path) => {
@@ -132,9 +138,10 @@ const matchPath = (patha, pathb) => {
   }
 }
 
+
 // Where a new worker has the exact same path as an existing worker, it will need to remove the existing
 // worker's path so there is no conflict.
-const removePathFromExistingWorker = (worker, envName, myRoute) => {
+const removePathFromExistingWorker = (worker, envName, myRoute, workersForEnv) => {
   if (worker.parsed.env == undefined) {
     worker.parsed.env = {};
   }
@@ -148,9 +155,21 @@ const removePathFromExistingWorker = (worker, envName, myRoute) => {
     worker.parsed.env[envName].dwn_original_routes = _.cloneDeep(worker.parsed.env[envName].routes);
   }
 
-  const index = worker.parsed.env[envName].routes.indexOf(myRoute);
+  const index = worker.parsed.env[envName].routes.findIndex((route)=> {
+    return _.isEqual(getRoute(route), myRoute);
+  });
+
   if (index > -1) {
     worker.parsed.env[envName].routes.splice(index, 1);
+  }
+}
+
+
+const getRoute = (route) => {
+  if (_.isObject(route)) {
+    return route.pattern;
+  } else {
+    return route;
   }
 }
 
@@ -177,10 +196,11 @@ const findUpstreamService = (myRoutes, envName, existingWorkers) => {
       if (workersForEnv === undefined) {
         continue;
       }
-      for (const theirRoute of workersForEnv) {
+      for (const theirRouteRaw of workersForEnv) {
+        let theirRoute = getRoute(theirRouteRaw);
         if (_.isEqual(myRoute,theirRoute)) {
           // Since path is identical to a darwinium step, we cannot have two overlapping steps. Remove this step from that.
-          removePathFromExistingWorker(worker, envName, myRoute);
+          removePathFromExistingWorker(worker, envName, myRoute, workersForEnv);
 
           // Cannot be any tighter match than this
           return getName(worker);
