@@ -90,12 +90,7 @@ const writeoutModifiedExistingWorkers = (existingWorkers) => {
 // Emulates Cloudflare's path matching logic to find overlapping routes.
 const matchPath = (patha, pathb) => {
   const trimScheme = (path) => {
-    let _path;
-    if(_.isObject(path)){
-      _path = path.pattern; 
-    }else{
-      _path = path;
-    }
+    let _path = getRoute(path);
     if (_path.startsWith("http://")) {
       return _path.slice(7);
     }
