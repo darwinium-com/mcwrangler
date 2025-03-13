@@ -152,7 +152,8 @@ type = "CompiledWasm"
 globs = ["*.wasm"]
 fallthrough = true
 `;
-  
+
+  let prefix_regex = /^dwn_/;
   // Create an [env] for each instance that we're deploying to.
   let outs = []
   for(const [envName, env] of Object.entries(envs)){
@@ -171,6 +172,7 @@ fallthrough = true
 kv_namespaces = [
 ${kv}
 ]
+name = "${workerName.replace(prefix_regex, "dwn_" + env.node_abbr_name + "_")}"
 routes = ${JSON.stringify(myRoutes)}
 account_id = "${env.accountid ?? accountId}"
 ${services}
