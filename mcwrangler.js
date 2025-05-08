@@ -8,10 +8,28 @@ const { program } = require('commander');
 const { getExistingWorkers, writeoutModifiedExistingWorkers, findUpstreamService } = require('./existing_workers.js');
 const _ = require('lodash');
 const TOML = require('smol-toml');
+let pipe;
 
 let config;
 let accountId;
 
+const isWritableFd = (fd) => {
+  try {
+    fs.writeSync(fd, ''); // Try writing an empty string
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+if (isWritableFd(3)){
+  pipe = fs.createWriteStream(null, { fd: 3 });
+}
+
+const writeCommand = (...args) => {
+  if(pipe) pipe.write(args.join(' ') + '\n');
+  console.log(...args);
+}
 
 const httpGetOptions = (env, url) => {
   const key = fs.readFileSync(env.cert.key);
@@ -222,21 +240,37 @@ const processCommit = async (firstEnv, unpackDirName, commitHash) => {
     console.log('\n\n');
     console.log(`\x1b[1m\x1b[4m%s\x1b[0m`, `Deployment Instructions for environment: ${envName}\n`);
     console.log(`\x1b[32m%s\x1b[0m`, '1. Notify Darwinium that the deployment(s) are starting:');
-    console.log(`curl --request PUT --cert ${config[envName].cert.cert} --key ${config[envName].cert.key} --pass ${config[envName].cert.passphrase} https://${config[envName].dwn_api_host}:9443/api/deployment/current/${commitHash} `);
+    writeCommand(`curl --request PUT --cert ${config[envName].cert.cert} --key ${config[envName].cert.key} --pass ${config[envName].cert.passphrase} https://${config[envName].dwn_api_host}:9443/api/deployment/current/${commitHash} `);
     console.log(`\x1b[32m%s\x1b[0m`, `2. Commands to run to deploy ${unpackDirName} using wrangler:`);
     target_worker_routes.forEach(([targetName, workerRoutes]) => {
       Object.entries(workerRoutes).forEach(([workerName, routes_by_env]) => {
         if (envName in routes_by_env) {
-          console.log(`cd ${unpackDirName}/${targetName}/${workerName} && wrangler deploy -e ${envName} && cd ../../../../`);
+          writeCommand(`cd ${unpackDirName}/${targetName}/${workerName} && wrangler deploy -e ${envName} && cd ../../../../`);
         }
       });
     });
     console.log(`\x1b[32m%s\x1b[0m`, '3. Notify Darwinium that the deployment(s) have finished:');
-    console.log(`curl --request PUT --cert ${config[envName].cert.cert} --key ${config[envName].cert.key} --pass ${config[envName].cert.passphrase} https://${config[envName].dwn_api_host}:9443/api/deployment/current/${commitHash}?mode=finished `);
+    writeCommand(`curl --request PUT --cert ${config[envName].cert.cert} --key ${config[envName].cert.key} --pass ${config[envName].cert.passphrase} https://${config[envName].dwn_api_host}:9443/api/deployment/current/${commitHash}?mode=finished `);
     });
 }
 
 
+const getCurrentCommit = async (env) => {
+  return new Promise((resolve, reject) => {
+    var options = httpGetOptions(env, '/api/deployment/current');
+    let req = https.request(options, function(res) {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      res.on('error', (err) => reject(err));
+      res.on('end', () => {
+        resolve(Buffer.concat(chunks).toString('utf8'))
+      });
+    });
+    req.end()  
+  });
+  
+  //let commitHash = await readRemote(env, '/api/deployment/current');
+}
 
 
 const main = async () => {
@@ -266,8 +300,13 @@ See: https://docs.darwinium.com/docs/setting-up-certificates for details on how 
     cert.cert = path.join(configPath, cert.cert);
     cert.key = path.join(configPath, cert.key);
   }
-  accountId = program.getOptionValue('accountid');
+  accountId = program.getOptionValue('accountid');  
   
+  if(commitHash === 'current'){
+    commitHash = await getCurrentCommit(config[Object.keys(config)[0]]);
+  }
+
+
   if(commitHash.length !== 40) {
     console.log('\x1b[31m%s\x1b[0m', `Invalid commit hash: ${commitHash}`);
     return -1;
